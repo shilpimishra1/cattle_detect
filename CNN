@@ -1,0 +1,173 @@
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+import numpy as np
+
+# Define the paths
+train_dir = r"C:\Users\ASUS\Desktop\train"
+val_dir = r"C:\Users\ASUS\Desktop\val"
+# Image data generator with data augmentation
+train_datagen = ImageDataGenerator(
+    rescale=1./255,  #preprocess the images and generate batches
+    shear_range=0.2,
+    zoom_range=0.2,
+    horizontal_flip=True
+)
+
+val_datagen = ImageDataGenerator(rescale=1./255)
+
+# Create generators
+train_generator = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=(150, 150),
+    batch_size=32,
+    class_mode='categorical'
+)
+
+val_generator = val_datagen.flow_from_directory(
+    val_dir,
+    target_size=(150, 150),
+    batch_size=32,
+    class_mode='categorical'
+)
+# Define the CNN model
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(150, 150, 3)),
+    MaxPooling2D(pool_size=(2, 2)), #edges,corners detect
+    
+    Conv2D(64, (3, 3), activation='relu'),
+    MaxPooling2D(pool_size=(2, 2)),#simple shape and texture
+    
+    Conv2D(128, (3, 3), activation='relu'),
+    MaxPooling2D(pool_size=(2, 2)), #complex pattern
+    
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dropout(0.5),
+    
+    Dense(train_generator.num_classes, activation='softmax')
+])
+# Compile the model
+model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
+# Train the model
+history = model.fit(
+    train_generator,
+    epochs=35,
+    validation_data=val_generator
+)
+# Save the model
+model.save('cow_breed_classifier.h5')
+
+# Load the model
+model = tf.keras.models.load_model('cow_breed_classifier.h5')
+# Prediction function
+def predict_breed(image_path):
+    img = tf.keras.preprocessing.image.load_img(image_path, target_size=(150, 150))
+    img_array = tf.keras.preprocessing.image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array /= 255.0
+
+    prediction = model.predict(img_array)
+    breed = np.argmax(prediction, axis=1)
+    class_indices = {v: k for k, v in train_generator.class_indices.items()}
+    return class_indices[breed[0]]
+  # User input for image path
+image_path = input("Enter the path to the cow image: ")
+breed = predict_breed(image_path)
+print(f'The predicted breed is: {breed}')
+#rcnn + grabcut for the masked output image
+import cv2
+import numpy as np
+import torch
+from torchvision import models, transforms
+from PIL import Image
+import matplotlib.pyplot as plt
+
+#Mask R-CNN model
+model1 = models.detection.maskrcnn_resnet50_fpn(pretrained=True)
+model1.eval()
+
+coco_instance_category_names=['person','bicycle','car','motorbike','aeroplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign'
+,'parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove'
+,'skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog'
+'pizza','donut','cake','chair','sofa','pottedplant','bed','diningtable','toilet','tvmonitor','laptop','mouse','remote','keyboard','cell phone','microwave',
+'oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
+
+# Function to process the image and make predictions
+def predict(image_path):
+    # Load the image
+    img = Image.open(image_path)  #PIL
+    transform = transforms.Compose([
+        transforms.ToTensor(),  #tensor 
+    ])
+    img_tensor = transform(img)
+    # Add batch dimension
+    img_tensor = img_tensor.unsqueeze(0)   #batch size 1
+    
+    # Make predictions
+    with torch.no_grad():
+        predictions = model1(img_tensor)
+    return img, predictions
+img, predictions = predict(image_path)
+ 
+# Process predictions to extract the mask and bounding box
+pred_labels=predictions[0]['labels'].numpy()
+pred_scores = predictions[0]['scores'].detach().numpy()
+pred_masks = (predictions[0]['masks'] > 0.5).squeeze().detach().cpu().numpy()
+
+cattle_label=21 #from coco
+confidence_threshold=0.5
+filtered_masks=[pred_masks[i] for i in range(len(pred_scores)) if pred_scores[i] > confidence_threshold and pred_labels[i]== cattle_label]
+filtered_labels = [pred_labels[i] for i in range(len(pred_scores)) if pred_scores[i] > confidence_threshold and pred_labels[i]== cattle_label]
+
+def create_segmented_output(img,masks):
+    segmented_img=np.zeros_like(np.array(img))
+    for mask in masks:
+        segmented_img[mask]= np.array(img)[mask] 
+    return segmented_img    
+segmented_img_bg=create_segmented_output(img,filtered_masks)
+
+def grabcut(image,mask):
+    grabcut_mask=np.zeros(mask.shape[:2],np.uint8)
+    grabcut_mask[mask[:,:,0]>0] = cv2.GC_PR_FGD
+    bgd_model=np.zeros((1,65),np.float64)
+    fgd_model=np.zeros((1,65),np.float64)
+    cv2.grabCut(image,grabcut_mask,None, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_MASK)
+    final_mask=np.where((grabcut_mask==cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD), 1, 0).astype('uint8')
+    segmented_output= image*final_mask[:,:,np.newaxis]
+    return segmented_output
+grabcut_output=grabcut(np.array(img),segmented_img_bg)
+
+# Visualize the result
+def visualize(original_img, mask_img, grabcut_output):
+    plt.figure(figsize=(15,5))
+
+    plt.subplot(1,3,1)
+    plt.imshow(original_img)
+    plt.title('input image')
+    plt.axis('off')
+
+    plt.subplot(1,3,2)
+    plt.imshow(mask_img)
+    plt.title('mask-rcnn')
+    plt.axis('off')
+    
+    plt.subplot(1,3,3)
+    plt.imshow(grabcut_output)
+    plt.title('output image')
+    plt.axis('off')
+    plt.show()    
+
+def create_mask_image(img,masks):
+    mask_img=np.zeros_like(np.array(img))
+    for mask in masks:
+        color=np.random.randint(0,255,(3,),dtype=np.uint8)
+        mask_img[mask]=color
+    return mask_img
+mask_img=create_mask_image(img, filtered_masks)
+visualize(img, mask_img, grabcut_output)
+print(f'The predicted breed is: {breed}')
+
+  
