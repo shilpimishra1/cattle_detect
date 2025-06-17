@@ -1,0 +1,60 @@
+#grabcut original code
+import cv2
+import numpy as np
+
+image = cv2.imread(r"C:\Users\ASUS\Downloads\RedDanecattle.jpg")
+image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)                         
+mask = np.zeros(image.shape[:2], np.uint8)
+
+# Define the background 
+bgd_model = np.zeros((1, 65), np.float64)
+fgd_model = np.zeros((1, 65), np.float64)
+# Create a rectangle around the cattle (adjust this to fit your image)
+rect = (50, 50, 900, 700) 
+
+# Apply GrabCut algorithm
+iterations = 80
+cv2.grabCut(image, mask, rect, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_RECT)
+
+# Modify the mask to binary (0 for background, 1 for foreground)
+mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+
+kernel = np.ones((5, 5), np.uint8)
+mask2 = cv2.dilate(mask2, kernel, iterations=5)  # Expand the foreground area
+mask2 = cv2.erode(mask2, kernel, iterations=5)
+
+# Apply the mask to the image
+image_cutout = image_rgb * mask2[:, :, np.newaxis]
+# Convert the image cutout to BGR for displaying with OpenCV
+image_cutout_bgr = cv2.cvtColor(image_cutout, cv2.COLOR_RGB2BGR)
+
+# Resize images while maintaining aspect ratio
+def resize_image(image, width=None, height=None):
+    (h, w) = image.shape[:2]
+    if width is None and height is None:
+        return image
+    if width is None:
+        aspect_ratio = height / float(h)
+        new_width = int(w * aspect_ratio)
+        return cv2.resize(image, (new_width, height))
+    if height is None:
+        aspect_ratio = width / float(w)
+        new_height = int(h * aspect_ratio)
+        return cv2.resize(image, (width, new_height))
+
+width = 300  # Set a fixed width for images
+resized_input = resize_image(image, width=width)
+resized_cutout = resize_image(image_cutout_bgr, width=width)
+
+# Create a blank image to hold both images side by side
+combined_height = max(resized_input.shape[0], resized_cutout.shape[0])
+combined_image = np.zeros((combined_height, width * 2, 3), dtype=np.uint8)
+
+# Place the images in the combined image
+combined_image[:resized_input.shape[0], :width] = resized_input
+combined_image[:resized_cutout.shape[0], width:] = resized_cutout
+
+# Display the combined image
+cv2.imshow('Input and Cattle Cutout', combined_image)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
