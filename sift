@@ -1,0 +1,131 @@
+import cv2
+import numpy as np
+import os
+from sklearn import svm
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import torch
+import torchvision
+model = torchvision.models.detection.maskrcnn_resnet50_fpn(pretrained=True)
+model.eval()
+def detect_cattle_parts(image, model):
+    # Convert image to tensor and normalize
+    image_tensor = torch.from_numpy(image.astype(np.float32) / 255.0).permute(2, 0, 1)
+    image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
+
+    # Perform inference
+    with torch.no_grad():
+        prediction = model(image_tensor)
+    
+    # Extract bounding boxes and masks from prediction
+    boxes = prediction[0]['boxes'].detach().cpu().numpy()
+    
+    return boxes
+def extract_sift_features(image, boxes):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sift = cv2.SIFT_create()
+    descriptors_all = []
+    
+    for box in boxes:
+        bbox = box.astype(int)
+        roi = gray[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+        
+        # Extract SIFT keypoints and descriptors from ROI
+        keypoints, descriptors = sift.detectAndCompute(roi, None)
+        
+        # Ensure descriptors are not None and have consistent shape
+        if descriptors is not None and descriptors.shape[0] > 0:
+            # Take up to 10 descriptors per ROI for simplicity
+            descriptors = descriptors[:10]
+            if descriptors.shape[1] < 128:  # Assume it is 128
+                descriptors = np.concatenate([descriptors, np.zeros((descriptors.shape[0], 128 - descriptors.shape[1]))], axis=1)
+            elif descriptors.shape[1] > 128:
+                descriptors = descriptors[:, :128]
+        
+            descriptors_all.extend(descriptors)
+    
+    return np.array(descriptors_all)  # Return list of descriptors
+  def train_svm(features, labels, test_size=0.2, random_state=42):
+    # Split data into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=test_size, random_state=random_state)
+    
+    scaler = StandardScaler()
+    max_length = 1280
+    features_padded_train = []
+    for descriptor in X_train:
+        if len(descriptor) < max_length:
+            descriptor = np.concatenate([descriptor, np.zeros(max_length - len(descriptor))])
+        elif len(descriptor) > max_length:
+            descriptor = descriptor[:max_length]
+        features_padded_train.append(descriptor)
+    
+    features_concatenated_train = np.array(features_padded_train)
+    
+    # Scale training features using StandardScaler
+    features_scaled_train = scaler.fit_transform(features_concatenated_train)
+    
+    # Train SVM classifier
+    clf = svm.SVC(kernel='linear')
+    clf.fit(features_scaled_train, y_train)
+    
+    # Scale test features using fitted StandardScaler
+    features_padded_test = []
+    for descriptor in X_test:
+        if len(descriptor) < max_length:
+            descriptor = np.concatenate([descriptor, np.zeros(max_length - len(descriptor))])
+        elif len(descriptor) > max_length:
+            descriptor = descriptor[:max_length]
+        features_padded_test.append(descriptor)
+    
+    features_concatenated_test = np.array(features_padded_test)
+    features_scaled_test = scaler.transform(features_concatenated_test)
+    
+    # Evaluate SVM classifier
+    accuracy = clf.score(features_scaled_test, y_test)
+    print(f"Accuracy on test set: {accuracy}")
+    
+    return clf, scaler
+  def predict_breed(user_image, clf, scaler):
+    boxes = detect_cattle_parts(user_image, model)
+
+    # Step 3: Extract SIFT features from detected cattle parts
+    descriptors = extract_sift_features(user_image, boxes)
+
+    # Step 4: Scale features using the same scaler used during training
+    descriptors_scaled = scaler.transform(descriptors)
+
+    # Step 5: Predict breed using trained SVM classifier
+    predicted_labels = clf.predict(descriptors_scaled)
+    predicted_breed = predicted_labels[0]  # Assuming only one breed is predicted
+
+    return predicted_breed
+  if __name__ == "__main__":
+    data_dir = r"C:\Users\ASUS\Downloads\Cattle Breeds"
+    
+    features = []
+    labels = []
+
+    for breed in os.listdir(data_dir):
+        breed_dir = os.path.join(data_dir, breed)
+        if os.path.isdir(breed_dir):
+            for filename in os.listdir(breed_dir):
+                if filename.endswith(".jpg"):
+                    image_path = os.path.join(breed_dir, filename)
+                    image = cv2.imread(image_path)
+
+                    # Step 2: Object detection using Mask R-CNN
+                    boxes = detect_cattle_parts(image, model)
+
+                    # Step 3: Extract SIFT features from detected cattle parts
+                    descriptors = extract_sift_features(image, boxes)
+
+                    # Step 4: Append to features and labels
+                    features.extend(descriptors)
+                    labels.extend([breed] * len(descriptors))
+    clf, scaler = train_svm(features, labels)
+    
+    user_image_path = r"C:\Users\ASUS\Downloads\RedDanecattle.jpg"  
+    user_image = cv2.imread(user_image_path)
+    predicted_breed = predict_breed(user_image, clf, scaler)
+    print(f"Predicted breed: {predicted_breed}")
+
