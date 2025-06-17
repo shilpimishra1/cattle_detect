@@ -1,0 +1,96 @@
+#rcnn + grabcut
+import cv2
+import numpy as np
+import torch
+from torchvision import models, transforms
+from PIL import Image
+import matplotlib.pyplot as plt
+
+#Mask R-CNN model
+model = models.detection.maskrcnn_resnet50_fpn(pretrained=True)
+model.eval()
+
+coco_instance_category_names=['person','bicycle','car','motorbike','aeroplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign'
+,'parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove'
+,'skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog'
+'pizza','donut','cake','chair','sofa','pottedplant','bed','diningtable','toilet','tvmonitor','laptop','mouse','remote','keyboard','cell phone','microwave',
+'oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
+
+# Function to process the image and make predictions
+def predict(image_path):
+    # Load the image
+    img = Image.open(image_path)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+    img_tensor = transform(img)
+    
+    # Add batch dimension
+    img_tensor = img_tensor.unsqueeze(0)
+    
+    # Make predictions
+    with torch.no_grad():
+        predictions = model(img_tensor)
+    
+    return img, predictions
+
+# Load image and get predictions
+image_path = r"C:\Users\ASUS\Downloads\Cattle Breeds\Brown Swiss cattle\BrownSwisscattle148_c.jpg" #enter path to image
+img, predictions = predict(image_path)
+ 
+# Process predictions to extract the mask and bounding box
+pred_labels=predictions[0]['labels'].numpy()
+pred_scores = predictions[0]['scores'].detach().numpy()
+pred_masks = (predictions[0]['masks'] > 0.5).squeeze().detach().cpu().numpy()
+
+cattle_label=21 #from coco
+confidence_threshold=0.5
+filtered_masks=[pred_masks[i] for i in range(len(pred_scores)) if pred_scores[i] > confidence_threshold and pred_labels[i]== cattle_label]
+filtered_labels = [pred_labels[i] for i in range(len(pred_scores)) if pred_scores[i] > confidence_threshold and pred_labels[i]== cattle_label]
+
+def create_segmented_output(img,masks):
+    segmented_img=np.zeros_like(np.array(img))
+    for mask in masks:
+        segmented_img[mask]= np.array(img)[mask] 
+    return segmented_img    
+segmented_img_bg=create_segmented_output(img,filtered_masks)
+
+def grabcut(image,mask):
+    grabcut_mask=np.zeros(mask.shape[:2],np.uint8)
+    grabcut_mask[mask[:,:,0]>0] = cv2.GC_PR_FGD
+    bgd_model=np.zeros((1,65),np.float64)
+    fgd_model=np.zeros((1,65),np.float64)
+    cv2.grabCut(image,grabcut_mask,None, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_MASK)
+    final_mask=np.where((grabcut_mask==cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD), 1, 0).astype('uint8')
+    segmented_output= image*final_mask[:,:,np.newaxis]
+    return segmented_output
+grabcut_output=grabcut(np.array(img),segmented_img_bg)
+
+# Visualize the result
+def visualize(original_img, mask_img, grabcut_output):
+    plt.figure(figsize=(15,5))
+
+    plt.subplot(1,3,1)
+    plt.imshow(original_img)
+    plt.title('input image')
+    plt.axis('off')
+
+    plt.subplot(1,3,2)
+    plt.imshow(mask_img)
+    plt.title('mask-rcnn')
+    plt.axis('off')
+    
+    plt.subplot(1,3,3)
+    plt.imshow(grabcut_output)
+    plt.title('output image')
+    plt.axis('off')
+    plt.show()    
+
+def create_mask_image(img,masks):
+    mask_img=np.zeros_like(np.array(img))
+    for mask in masks:
+        color=np.random.randint(0,255,(3,),dtype=np.uint8)
+        mask_img[mask]=color
+    return mask_img
+mask_img=create_mask_image(img, filtered_masks)
+visualize(img, mask_img, grabcut_output)
